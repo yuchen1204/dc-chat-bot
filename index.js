@@ -215,7 +215,7 @@ async function saveUserMessage(userId, content, useGemini = false) {
     currentHistory.push(message);
     
     // 如果历史消息超过20条，删除最早的消息
-    if (currentHistory.length > 20) {
+    if (currentHistory.length > 100) {
       currentHistory.shift();
     }
     
@@ -252,7 +252,7 @@ async function saveAIResponse(userId, content, useGemini = false) {
     currentHistory.push(message);
     
     // 如果历史消息超过20条，删除最早的消息
-    if (currentHistory.length > 20) {
+    if (currentHistory.length > 100) {
       currentHistory.shift();
     }
     
@@ -335,11 +335,13 @@ function updateUserSession(userId, channelId, isNewSession = false, useGemini = 
   // 更新会话数据
   userSessions.set(sessionKey, {
     lastActivity: now,
-    isNotified: existingSession.isNotified || false, // 是否已通知会话模式
-    startTime: existingSession.startTime || now, // 会话开始时间
+    isNotified: isNewSession ? false : (existingSession.isNotified || false), // 新会话时重置通知状态
+    startTime: isNewSession ? now : (existingSession.startTime || now), // 新会话时更新开始时间
     isNewSession: isNewSession, // 是否是新会话
-    useGemini: useGemini // 使用的AI模型
+    useGemini: useGemini // 使用的AI模型 - 始终使用传入的值
   });
+  
+  console.log(`会话更新: 用户=${userId}, 频道=${channelId}, 新会话=${isNewSession}, 使用Gemini=${useGemini}`);
   
   // 设置会话超时清理
   setTimeout(() => {
@@ -707,7 +709,24 @@ async function processUserMessage(msg, query, useGemini = false) {
     let ConvoLog = [{ 
       role: "system", 
       content: `你是一个有用的助手，${useGemini ? "名字是YY" : "名字是cc"}。${currentTimeContext}请根据用户的问题提供帮助。你的知识库可能截至2023年，但你应该使用提供给你的当前时间信息来回答与时间相关的问题。
-如果用户提到了之前与其他模型的对话，请理解并衔接之前的对话。当前你使用的是${useGemini ? "Google Gemini" : "OpenAI GPT-4o Mini"}模型，但用户可能之前与${useGemini ? "OpenAI GPT-4o Mini" : "Google Gemini"}模型交谈过。` 
+如果用户提到了之前与其他模型的对话，请理解并衔接之前的对话。当前你使用的是${useGemini ? "Google Gemini" : "OpenAI GPT-4o Mini"}模型，但用户可能之前与${useGemini ? "OpenAI GPT-4o Mini" : "Google Gemini"}模型交谈过。
+
+请使用Discord支持的Markdown格式来优化你的回复：
+1. 对于代码，使用代码块，例如：\`\`\`python\nprint("Hello World")\n\`\`\`
+2. 对于列表，使用Markdown列表，例如：
+   - 项目1
+   - 项目2
+3. 对于强调内容，使用**加粗**或*斜体*
+4. 对于标题，使用#、##等
+5. 对于引用，使用>符号
+6. 对于表格，使用Markdown表格格式
+7. 根据用户的需求选择最适合的格式，使内容清晰易读
+
+特别注意：
+- 当用户要求代码或提到"代码块"、"示例代码"、"代码示例"等，务必使用\`\`\`语言名\n代码\n\`\`\`格式
+- 当用户提到"列表"、"列出"、"排序"等，使用有序或无序列表格式
+- 当用户要求"表格"、"表单"等，使用Markdown表格格式
+- 分析用户请求中隐含的格式需求，如用户希望比较多个选项时，考虑使用表格或列表` 
     }];
 
     // 从Redis获取用户聊天历史（现在是统一的历史记录）
@@ -766,11 +785,15 @@ async function processUserMessage(msg, query, useGemini = false) {
     await saveAIResponse(userId, aiReplyContent, useGemini);
     
     try {
+      // 添加模型标识，帮助用户识别当前使用的模型
+      const modelPrefix = useGemini ? "[YY回复] " : "[CC回复] ";
+      
       // 尝试回复消息，如果失败则发送新消息
-      return await msg.reply(aiReplyContent);
+      return await msg.reply(modelPrefix + aiReplyContent);
     } catch (error) {
       console.error("回复消息失败，尝试发送新消息:", error);
-      return await msg.channel.send(aiReplyContent);
+      const modelPrefix = useGemini ? "[YY回复] " : "[CC回复] ";
+      return await msg.channel.send(modelPrefix + aiReplyContent);
     }
   } catch (e) {
     console.log(e);
@@ -855,17 +878,23 @@ client.on("messageCreate", async (msg) => {
       query = content.slice(2).trim();
     }
     
-    // 更新用户会话状态，标记为新会话
-    updateUserSession(userId, channelId, true, useGemini);
+    // 关键修改：无论是否在活跃会话中，始终根据前缀更新会话模型
+    // 如果当前有活跃会话但模型类型不同，则强制更新会话的模型类型
+    if (isInActiveSession && useGeminiInSession !== useGemini) {
+      console.log(`检测到模型切换: 从 ${useGeminiInSession ? "Gemini" : "OpenAI"} 切换到 ${useGemini ? "Gemini" : "OpenAI"}`);
+    }
     
-    // 获取会话数据
-    const newSessionData = userSessions.get(sessionKey);
+    // 更新用户会话状态，标记为新会话或更新现有会话
+    updateUserSession(userId, channelId, !isInActiveSession, useGemini);
+    
+    // 获取更新后的会话数据
+    const updatedSessionData = userSessions.get(sessionKey);
     
     // 如果是新会话且没有通知过，添加会话模式提示
-    if (newSessionData && newSessionData.isNewSession && !newSessionData.isNotified) {
+    if (updatedSessionData && updatedSessionData.isNewSession && !updatedSessionData.isNotified) {
       // 更新通知状态
-      newSessionData.isNotified = true;
-      userSessions.set(sessionKey, newSessionData);
+      updatedSessionData.isNotified = true;
+      userSessions.set(sessionKey, updatedSessionData);
       
       // 处理用户消息
       const response = await processUserMessage(msg, query, useGemini);
@@ -900,6 +929,15 @@ client.on("messageCreate", async (msg) => {
   } 
   // 检查是否在活跃会话中且不是回复其他用户的消息
   else if (isInActiveSession && (!isReplyMessage || isReplyToBot)) {
+    // 如果消息内容看起来像是一个模型切换指令，但没有被前面的条件捕获
+    // 这可能是因为在某些情况下前缀识别可能不正确，这里添加额外检查
+    if (lowercaseContent.startsWith("cc") || lowercaseContent.startsWith("小c") || 
+        lowercaseContent.startsWith("yy") || lowercaseContent.startsWith("小y")) {
+      console.log("检测到可能的模型切换命令，但未被正确识别，重新发送消息");
+      // 递归调用messageCreate事件处理，以便正确处理命令
+      return client.emit("messageCreate", msg);
+    }
+    
     console.log(`用户在活跃会话中，处理无前缀消息，使用模型: ${useGeminiInSession ? "Gemini" : "OpenAI"}`);
     
     // 显示正在输入的状态
